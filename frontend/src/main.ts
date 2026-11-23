@@ -9,10 +9,41 @@ interface InstructionResponse {
   params: Record<string, unknown>
 }
 
-interface TranscribeFlowResponse {
+interface InstructionFlowResult {
   transcription: string
   instruction: InstructionResponse
   result: unknown
+}
+
+interface SpeechRecognitionAlternativeLike {
+  transcript: string
+}
+
+interface SpeechRecognitionResultLike {
+  isFinal: boolean
+  [index: number]: SpeechRecognitionAlternativeLike
+}
+
+interface SpeechRecognitionEventLike {
+  resultIndex: number
+  results: ArrayLike<SpeechRecognitionResultLike>
+}
+
+interface SpeechRecognitionLike {
+  lang: string
+  interimResults: boolean
+  continuous: boolean
+  onstart: (() => void) | null
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null
+  onerror: ((event: { error: string }) => void) | null
+  onend: (() => void) | null
+  start(): void
+  stop(): void
+}
+
+interface SpeechRecognitionWindow extends Window {
+  SpeechRecognition?: new () => SpeechRecognitionLike
+  webkitSpeechRecognition?: new () => SpeechRecognitionLike
 }
 
 interface ChatMessage {
@@ -30,39 +61,33 @@ interface AppState {
   microphoneState: string
   isRecording: boolean
   isLoading: boolean
-  supportsAudioCapture: boolean
-  transcriptionFailures: number
+  supportsSpeechRecognition: boolean
   manualFallbackEnabled: boolean
   chat: ChatMessage[]
 }
 
 const API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL ?? '')
-const STORAGE_KEY_TRANSCRIBE_LANG = 'voice-command-api.transcribe-language'
 const REQUEST_TIMEOUT_MS = 45000
-const MAX_RECORDING_MS = 20000
-const MAX_AUTO_FAILURES = 2
-/** Emit audio chunks periodically so the final WebM contains real speech, not mostly silence (reduces Whisper “hallucinations” like Gracias). */
-const RECORDING_TIMESLICE_MS = 250
-
-const supportsAudioCapture =
-  Boolean(navigator.mediaDevices?.getUserMedia) && typeof MediaRecorder !== 'undefined'
+const speechRecognitionWindow = window as SpeechRecognitionWindow
+const SpeechRecognitionConstructor =
+  speechRecognitionWindow.SpeechRecognition ?? speechRecognitionWindow.webkitSpeechRecognition
+const supportsSpeechRecognition = Boolean(SpeechRecognitionConstructor)
 
 const state: AppState = {
   transcription: '',
-  microphoneState: supportsAudioCapture
-    ? 'Press record. Audio stops automatically after 20 seconds.'
-    : 'Audio recording is unavailable in this browser.',
+  microphoneState: supportsSpeechRecognition
+    ? 'Press the button and speak your task command.'
+    : 'Speech recognition is unavailable in this browser. Use manual transcription.',
   isRecording: false,
   isLoading: false,
-  supportsAudioCapture,
-  transcriptionFailures: 0,
-  manualFallbackEnabled: !supportsAudioCapture,
+  supportsSpeechRecognition,
+  manualFallbackEnabled: !supportsSpeechRecognition,
   chat: [
     {
       id: Date.now(),
       role: 'assistant',
       heading: 'Voice Task Assistant',
-      body: 'Record a command on the right. I will show the transcription the backend heard and the final task API response here.',
+      body: 'Speak a command on the right. Your browser transcribes it, then the backend routes it to the task API.',
       timestamp: formatTime(),
     },
   ],
@@ -92,7 +117,7 @@ app.innerHTML = `
         <header class="section-header compact">
           <div>
             <span class="section-kicker">Recorder</span>
-            <h2>20 second voice capture</h2>
+            <h2>Voice command</h2>
           </div>
           <p class="status-copy" id="microphone-state"></p>
         </header>
@@ -105,14 +130,13 @@ app.innerHTML = `
             <span class="section-kicker">Live status</span>
             <h3 id="listening-chip"></h3>
             <p>
-              After two failed recordings, manual transcription unlocks automatically. Speak for several seconds; if the clip
-              is mostly silence, Whisper often guesses short words like “Gracias”.
+              Speech is transcribed in your browser. The resulting text is sent to the backend for task routing.
             </p>
           </div>
         </div>
 
-        <label class="field-label" for="transcribe-lang">Transcription language (Whisper)</label>
-        <select id="transcribe-lang" class="transcribe-lang-select" aria-label="Transcription language">
+        <label class="field-label" for="transcribe-lang">Speech recognition language</label>
+        <select id="transcribe-lang" class="transcribe-lang-select" aria-label="Speech recognition language">
           <option value="">Auto-detect</option>
           <option value="es">Español</option>
           <option value="en">English</option>
@@ -151,50 +175,24 @@ const listeningChip = mustQuery<HTMLHeadingElement>('#listening-chip')
 const pulseRing = mustQuery<HTMLDivElement>('#pulse-ring')
 const chatThread = mustQuery<HTMLDivElement>('#chat-thread')
 
-let mediaRecorder: MediaRecorder | null = null
-let recordedChunks: BlobPart[] = []
-let activeStream: MediaStream | null = null
-let stopTimerId: number | null = null
-
-function pickRecorderMimeType(): string | undefined {
-  const candidates = [
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/mp4',
-    'audio/ogg;codecs=opus',
-  ]
-  for (const mimeType of candidates) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return mimeType
-    }
-  }
-  return undefined
-}
-
-transcribeLangSelect.value = localStorage.getItem(STORAGE_KEY_TRANSCRIBE_LANG) ?? ''
-transcribeLangSelect.addEventListener('change', () => {
-  const v = transcribeLangSelect.value
-  if (v) {
-    localStorage.setItem(STORAGE_KEY_TRANSCRIBE_LANG, v)
-  } else {
-    localStorage.removeItem(STORAGE_KEY_TRANSCRIBE_LANG)
-  }
-})
+let speechRecognition: SpeechRecognitionLike | null = null
 
 listenToggleButton.addEventListener('click', async () => {
-  if (!state.supportsAudioCapture) {
-    registerFailure('Audio capture is not available in this browser. Manual transcription is now enabled.')
+  if (!SpeechRecognitionConstructor) {
+    state.manualFallbackEnabled = true
+    state.microphoneState = 'Speech recognition is unavailable. Use manual transcription.'
+    render()
     return
   }
 
   if (state.isRecording) {
-    stopRecording('Stopping recording...')
+    speechRecognition?.stop()
     return
   }
 
   state.transcription = ''
   render()
-  await startRecording()
+  startSpeechRecognition()
 })
 
 runManualButton.addEventListener('click', async () => {
@@ -207,111 +205,93 @@ transcriptionInput.addEventListener('input', () => {
 
 render()
 
-async function startRecording(): Promise<void> {
+function startSpeechRecognition(): void {
+  if (!SpeechRecognitionConstructor) return
+
   try {
-    recordedChunks = []
-    activeStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    const mimeType = pickRecorderMimeType()
-    mediaRecorder = mimeType
-      ? new MediaRecorder(activeStream, { mimeType })
-      : new MediaRecorder(activeStream)
+    const recognition = new SpeechRecognitionConstructor()
+    speechRecognition = recognition
+    recognition.lang = transcribeLangSelect.value || navigator.language || 'en-US'
+    recognition.interimResults = true
+    recognition.continuous = false
 
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        recordedChunks.push(event.data)
-      }
-    }
-
-    mediaRecorder.onerror = () => {
-      registerFailure('The browser failed while recording audio.')
-    }
-
-    mediaRecorder.onstart = () => {
+    recognition.onstart = () => {
       state.isRecording = true
-      state.microphoneState = 'Recording now. It will stop automatically after 20 seconds.'
-      scheduleAutoStop()
+      state.microphoneState = 'Listening. Speak your task command now.'
       render()
     }
 
-    mediaRecorder.onstop = async () => {
-      clearAutoStop()
-      state.isRecording = false
-      render()
+    recognition.onresult = (event) => {
+      let finalTranscript = ''
+      let interimTranscript = ''
 
-      try {
-        const audioBlob = new Blob(recordedChunks, {
-          type: mediaRecorder?.mimeType || 'audio/webm',
-        })
-
-        if (!audioBlob.size) {
-          throw new Error('No audio was captured. Try again and speak a bit closer to the mic.')
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index]
+        if (!result) continue
+        if (result.isFinal) {
+          finalTranscript += result[0]?.transcript ?? ''
+        } else {
+          interimTranscript += result[0]?.transcript ?? ''
         }
-
-        state.isLoading = true
-        state.microphoneState = 'Uploading audio for transcription...'
-        render()
-
-        const payload = await postAudioForFlow(audioBlob)
-        state.transcription = payload.transcription
-        appendUserAndAssistantMessages(payload.transcription, payload.instruction, payload.result)
-        state.microphoneState = 'Command completed successfully.'
-      } catch (error) {
-        registerFailure(toErrorMessage(error))
-      } finally {
-        state.isLoading = false
-        cleanupRecorder()
-        render()
       }
+
+      if (finalTranscript.trim()) {
+        state.transcription = `${state.transcription} ${finalTranscript}`.trim()
+      } else if (interimTranscript.trim()) {
+        transcriptionInput.value = `${state.transcription} ${interimTranscript}`.trim()
+      }
+      render()
     }
 
-    mediaRecorder.start(RECORDING_TIMESLICE_MS)
+    recognition.onerror = (event) => {
+      state.isRecording = false
+      speechRecognition = null
+      state.microphoneState = `Speech recognition error: ${event.error}. You can try again or enter the transcription manually.`
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        state.manualFallbackEnabled = true
+      }
+      render()
+    }
+
+    recognition.onend = async () => {
+      state.isRecording = false
+      speechRecognition = null
+      const transcription = state.transcription.trim()
+      if (!transcription) {
+        state.microphoneState = 'No speech was recognized. Try again or enter a transcription manually.'
+        render()
+        return
+      }
+
+      await processTranscription(transcription)
+    }
+
+    recognition.start()
+  } catch (error) {
+    state.isRecording = false
+    speechRecognition = null
+    state.manualFallbackEnabled = true
+    state.microphoneState = toErrorMessage(error)
+    render()
+  }
+}
+
+async function processTranscription(transcription: string): Promise<void> {
+  try {
+    state.isLoading = true
+    state.microphoneState = 'Sending transcription for routing and task execution...'
+    render()
+
+    const payload = await runInstructionFlow(transcription)
+    state.transcription = payload.transcription
+    appendUserAndAssistantMessages(payload.transcription, payload.instruction, payload.result)
+    state.microphoneState = 'Command completed successfully.'
   } catch (error) {
     registerFailure(toErrorMessage(error))
+  } finally {
+    state.isLoading = false
+    render()
   }
-}
-
-function stopRecording(statusMessage: string): void {
-  state.microphoneState = statusMessage
-  render()
-
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    if (mediaRecorder.state === 'recording') {
-      mediaRecorder.requestData()
-    }
-    mediaRecorder.stop()
-    return
-  }
-
-  cleanupRecorder()
-}
-
-function scheduleAutoStop(): void {
-  clearAutoStop()
-  stopTimerId = window.setTimeout(() => {
-    if (state.isRecording) {
-      stopRecording('20 second limit reached. Finalizing audio...')
-    }
-  }, MAX_RECORDING_MS)
-}
-
-function clearAutoStop(): void {
-  if (stopTimerId !== null) {
-    window.clearTimeout(stopTimerId)
-    stopTimerId = null
-  }
-}
-
-function cleanupRecorder(): void {
-  clearAutoStop()
-
-  if (activeStream) {
-    activeStream.getTracks().forEach((track) => track.stop())
-    activeStream = null
-  }
-
-  mediaRecorder = null
-  recordedChunks = []
-  state.isRecording = false
 }
 
 async function submitManualTranscription(rawValue: string): Promise<void> {
@@ -328,30 +308,17 @@ async function submitManualTranscription(rawValue: string): Promise<void> {
   }
 
   try {
-    state.isLoading = true
-    state.microphoneState = 'Sending manual transcription to the backend...'
-    render()
-
-    const payload = await postManualTranscription(transcription)
-    state.transcription = payload.transcription
-    appendUserAndAssistantMessages(payload.transcription, payload.instruction, payload.result)
-    state.microphoneState = 'Manual command completed successfully.'
-  } catch (error) {
-    registerFailure(toErrorMessage(error))
+    await processTranscription(transcription)
   } finally {
-    state.isLoading = false
-    render()
+    transcriptionInput.value = ''
   }
 }
 
 function registerFailure(message: string): void {
-  cleanupRecorder()
+  state.isRecording = false
+  speechRecognition = null
   state.isLoading = false
-  state.transcriptionFailures += 1
-  state.manualFallbackEnabled = state.transcriptionFailures >= MAX_AUTO_FAILURES || !state.supportsAudioCapture
-  state.microphoneState = state.manualFallbackEnabled
-    ? 'Recording failed twice. Manual transcription is now available.'
-    : 'Recording failed. You can try again.'
+  state.microphoneState = 'The command failed. You can try again or enter the transcription manually.'
 
   appendMessage({
     role: 'error',
@@ -361,40 +328,9 @@ function registerFailure(message: string): void {
   render()
 }
 
-function selectedTranscriptionLanguage(): string {
-  return transcribeLangSelect.value.trim().toLowerCase()
-}
-
-async function postAudioForFlow(audioBlob: Blob): Promise<TranscribeFlowResponse> {
-  const formData = new FormData()
-  formData.append('file', audioBlob, inferAudioFilename(audioBlob.type))
-  const lang = selectedTranscriptionLanguage()
-  if (lang) {
-    formData.append('language', lang)
-  }
-
+async function runInstructionFlow(transcription: string): Promise<InstructionFlowResult> {
   const response = await fetchWithTimeout(
-    `${API_BASE_URL}/transcribe`,
-    {
-      method: 'POST',
-      body: formData,
-    },
-    REQUEST_TIMEOUT_MS,
-    'Audio transcription took too long. Check the backend server and Groq integration.',
-  )
-
-  const data = await safeReadJson(response)
-
-  if (!response.ok) {
-    throw new Error(`Voice flow failed (${response.status}): ${stringifyData(data)}`)
-  }
-
-  return validateFlowResponse(data)
-}
-
-async function postManualTranscription(transcription: string): Promise<TranscribeFlowResponse> {
-  const response = await fetchWithTimeout(
-    `${API_BASE_URL}/transcribe`,
+    `${API_BASE_URL}/instruction`,
     {
       method: 'POST',
       headers: {
@@ -403,34 +339,25 @@ async function postManualTranscription(transcription: string): Promise<Transcrib
       body: JSON.stringify({ transcription }),
     },
     REQUEST_TIMEOUT_MS,
-    'Manual transcription took too long. Check the backend server and Groq integration.',
+    'Instruction routing took too long. Check the backend server and Groq integration.',
   )
 
-  const data = await safeReadJson(response)
-
   if (!response.ok) {
-    throw new Error(`Manual flow failed (${response.status}): ${stringifyData(data)}`)
+    throw new Error(`Instruction routing failed (${response.status}): ${stringifyData(await safeReadJson(response))}`)
   }
 
-  return validateFlowResponse(data)
+  const instruction = validateInstructionResponse(await safeReadJson(response))
+  const result = await executeTaskInstruction(instruction)
+
+  return { transcription: transcription.trim(), instruction, result }
 }
 
-function validateFlowResponse(data: unknown): TranscribeFlowResponse {
+function validateInstructionResponse(data: unknown): InstructionResponse {
   if (!data || typeof data !== 'object') {
-    throw new Error('The /transcribe endpoint did not return a valid JSON object.')
+    throw new Error('The /instruction endpoint did not return a valid JSON object.')
   }
 
-  const candidate = data as Partial<TranscribeFlowResponse>
-
-  if (typeof candidate.transcription !== 'string' || !candidate.transcription.trim()) {
-    throw new Error('The /transcribe response is missing a valid transcription.')
-  }
-
-  if (!candidate.instruction || typeof candidate.instruction !== 'object') {
-    throw new Error('The /transcribe response is missing the routed instruction.')
-  }
-
-  const instruction = candidate.instruction as Partial<InstructionResponse>
+  const instruction = data as Partial<InstructionResponse>
   if (
     typeof instruction.endpoint !== 'string' ||
     typeof instruction.method !== 'string' ||
@@ -438,18 +365,59 @@ function validateFlowResponse(data: unknown): TranscribeFlowResponse {
     typeof instruction.params !== 'object' ||
     Array.isArray(instruction.params)
   ) {
-    throw new Error('The /transcribe response returned an invalid instruction payload.')
+    throw new Error('The /instruction response returned an invalid instruction payload.')
   }
 
   return {
-    transcription: candidate.transcription.trim(),
-    instruction: {
-      endpoint: instruction.endpoint,
-      method: instruction.method.toUpperCase() as SupportedMethod,
-      params: instruction.params,
-    },
-    result: candidate.result,
+    endpoint: instruction.endpoint,
+    method: instruction.method.toUpperCase() as SupportedMethod,
+    params: instruction.params,
   }
+}
+
+async function executeTaskInstruction(instruction: InstructionResponse): Promise<unknown> {
+  const method = instruction.method
+  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    throw new Error(`Unsupported task API method: ${method}`)
+  }
+
+  const rawTaskId = instruction.params.task_id
+  let endpoint = instruction.endpoint
+  if (endpoint.includes('{task_id}')) {
+    if (typeof rawTaskId !== 'number' || !Number.isInteger(rawTaskId) || rawTaskId < 1) {
+      throw new Error('The routed task operation is missing a valid task_id.')
+    }
+    endpoint = endpoint.replace('{task_id}', String(rawTaskId))
+  }
+
+  if (endpoint !== '/tasks' && !/^\/tasks\/\d+$/.test(endpoint)) {
+    throw new Error(`Unsupported task API endpoint: ${endpoint}`)
+  }
+
+  const params = { ...instruction.params }
+  delete params.task_id
+  const hasBody = method === 'POST' || method === 'PUT' || method === 'PATCH'
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}${endpoint}`,
+    {
+      method,
+      ...(hasBody
+        ? {
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params),
+          }
+        : {}),
+    },
+    REQUEST_TIMEOUT_MS,
+    'Task request took too long. Check the backend server.',
+  )
+  const result = await safeReadJson(response)
+
+  if (!response.ok) {
+    throw new Error(`Task request failed (${response.status}): ${stringifyData(result)}`)
+  }
+
+  return result
 }
 
 function appendUserAndAssistantMessages(
@@ -466,7 +434,8 @@ function appendUserAndAssistantMessages(
   appendMessage({
     role: 'assistant',
     heading: 'API response',
-    body: 'The backend transcribed the audio, resolved the instruction, and executed the task action.',
+    body: `Routing: ${_instruction.method} ${_instruction.endpoint}. The frontend called the matching task endpoint.`,
+    instruction: _instruction,
     response: result,
   })
 }
@@ -510,13 +479,6 @@ async function safeReadJson(response: Response): Promise<unknown> {
   }
 }
 
-function inferAudioFilename(mimeType: string): string {
-  if (mimeType.includes('ogg')) return 'command.ogg'
-  if (mimeType.includes('mp4') || mimeType.includes('m4a')) return 'command.m4a'
-  if (mimeType.includes('wav')) return 'command.wav'
-  return 'command.webm'
-}
-
 function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim()
 
@@ -550,15 +512,15 @@ function toErrorMessage(error: unknown): string {
 
 function render(): void {
   listeningChip.textContent = state.isLoading ? 'Working...' : state.isRecording ? 'Recording' : 'Stand by'
-  listenToggleButton.textContent = state.isRecording ? 'Stop recording' : 'Record up to 20s'
-  listenToggleButton.disabled = !state.supportsAudioCapture || state.isLoading
+  listenToggleButton.textContent = state.isRecording ? 'Stop listening' : 'Speak a command'
+  listenToggleButton.disabled = !state.supportsSpeechRecognition || state.isLoading
   transcribeLangSelect.disabled = state.isLoading || state.isRecording
   runManualButton.disabled = state.isLoading
   transcriptionInput.disabled = state.isLoading
   manualFallbackPanel.hidden = !state.manualFallbackEnabled
 
   pulseRing.dataset.active = state.isRecording ? 'true' : 'false'
-  pulseRing.dataset.blocked = state.supportsAudioCapture ? 'false' : 'true'
+  pulseRing.dataset.blocked = state.supportsSpeechRecognition ? 'false' : 'true'
 
   transcriptionInput.value = state.transcription
   microphoneState.textContent = state.microphoneState

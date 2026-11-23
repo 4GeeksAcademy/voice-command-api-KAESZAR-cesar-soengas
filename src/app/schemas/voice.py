@@ -38,6 +38,10 @@ class InstructionPayload(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class TranscriptionResponse(BaseModel):
+    transcription: str = Field(..., min_length=1)
+
+
 class TranscribeFlowResponse(BaseModel):
     transcription: str = Field(..., min_length=1)
     instruction: InstructionPayload

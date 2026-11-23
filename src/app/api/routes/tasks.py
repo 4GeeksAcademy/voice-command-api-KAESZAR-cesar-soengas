@@ -4,7 +4,7 @@ from src.app.schemas.voice import Task, TaskCreate, TaskReplace, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
-tasks: list[Task] = []
+tasks: list[dict[str, int | str | bool]] = []
 next_task_id = 1
 
 
@@ -16,7 +16,7 @@ next_task_id = 1
     response_description="Lista de tareas",
 )
 def get_tasks() -> list[Task]:
-    return tasks
+    return [Task.model_validate(task) for task in tasks]
 
 
 @router.post(
@@ -30,10 +30,10 @@ def get_tasks() -> list[Task]:
 def create_task(payload: TaskCreate) -> Task:
     global next_task_id
 
-    task = Task(id=next_task_id, title=payload.title, done=payload.done)
+    task = {"id": next_task_id, "title": payload.title, "done": payload.done}
     tasks.append(task)
     next_task_id += 1
-    return task
+    return Task.model_validate(task)
 
 
 @router.put(
@@ -49,10 +49,10 @@ def replace_task(
     payload: TaskReplace,
 ) -> Task:
     for index, task in enumerate(tasks):
-        if task.id == task_id:
-            replacement = Task(id=task_id, title=payload.title, done=payload.done)
+        if task["id"] == task_id:
+            replacement = {"id": task_id, "title": payload.title, "done": payload.done}
             tasks[index] = replacement
-            return replacement
+            return Task.model_validate(replacement)
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -73,11 +73,11 @@ def update_task(
     payload: TaskUpdate,
 ) -> Task:
     for index, task in enumerate(tasks):
-        if task.id == task_id:
+        if task["id"] == task_id:
             changes = payload.model_dump(exclude_unset=True, exclude_none=True)
-            updated = task.model_copy(update=changes)
+            updated = {**task, **changes}
             tasks[index] = updated
-            return updated
+            return Task.model_validate(updated)
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -95,7 +95,7 @@ def update_task(
 )
 def delete_task(task_id: int) -> dict[str, str]:
     for task in tasks:
-        if task.id == task_id:
+        if task["id"] == task_id:
             tasks.remove(task)
             return {"message": f"Task {task_id} deleted successfully"}
 
