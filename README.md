@@ -7,127 +7,110 @@ By [@ehiber](https://github.com/ehiber) and [other contributors](https://github.
 [![build by developers](https://img.shields.io/badge/build_by-Developers-blue)](https://4geeks.com)
 [![4Geeks Academy](https://img.shields.io/twitter/follow/4geeksacademy?style=social&logo=x)](https://x.com/4geeksacademy)
 
-_Estas instrucciones tambien estan disponibles en [espanol](./README.es.md)._
-
-**Before you start**: Read the [how to start a coding project](https://4geeks.com/lesson/how-to-start-a-project) guide before writing code.
-
-> We need you! These exercises are built and maintained in collaboration with people like you. If you find any bug 🐞 or typo, please contribute and/or report it.
+_Lee estas instrucciones en [español](./README.es.md)._
 
 <!-- endhide -->
 
 ---
 
-## 🎯 Your challenge
+## Overview
 
-This repository is the starter template for the **Voice Command API** project.
+Voice Command API lets users manage tasks with voice commands. The frontend uses the browser's **Web Speech API** to turn speech into text, then sends the transcription to `POST /instruction`. The backend uses Groq to return a structured operation, and the frontend calls the corresponding `/tasks` endpoint.
 
-The frontend is already built. It records up to **20 seconds** of audio in the browser, sends that audio to your backend, and shows:
+Users can also type a transcription manually if their browser does not support speech recognition or they do not want to use the microphone.
 
-- the transcription returned by the API
-- the final task response returned by the API
+## Instruction flow
 
-Your job is to implement the backend so the full voice-to-action flow works end to end.
+1. The user speaks a command and grants microphone access to the browser, or types the command manually.
+2. The browser transcribes speech and the frontend sends JSON to `POST /instruction`:
 
----
+   ```json
+   { "transcription": "add buy groceries to my list" }
+   ```
 
-## How the project works
+3. The backend asks Groq to return only the routing instruction, for example:
 
-The frontend uses a single public entry point:
+   ```json
+   {
+     "endpoint": "/tasks",
+     "method": "POST",
+     "params": { "title": "Buy groceries" }
+   }
+   ```
 
-- `POST /transcribe`
+4. The frontend sends the indicated `POST /tasks` request and displays the result.
 
-The frontend does **not** resolve intents with the Web Speech API. It only captures audio (up to 20 seconds), sends the file to `POST /transcribe`, and shows the backend transcription to make debugging easier.
+The LLM chooses the operation; the backend must not infer intent using manual keyword matching. The `POST /transcribe` endpoint is also available for transcribing uploaded audio files with Groq, but **it is not part of the voice flow currently used by the frontend**.
 
-That endpoint must:
+## Endpoints
 
-1. receive recorded audio from the frontend
-2. transcribe it to text
-3. reuse the same routing logic as `POST /instruction`
-4. execute the corresponding task action in memory
-5. return the transcription, the instruction payload, and the final result
+| Method | Path | Description | Typical response |
+|---|---|---|---|
+| `POST` | `/instruction` | Routes a transcription with Groq; does not execute the task operation. | `200` |
+| `GET` | `/tasks` | Returns all tasks. | `200` |
+| `POST` | `/tasks` | Creates a task and assigns an incremental ID. | `201` |
+| `PUT` | `/tasks/{task_id}` | Replaces an existing task. | `200` |
+| `PATCH` | `/tasks/{task_id}` | Partially updates a task. | `200` |
+| `DELETE` | `/tasks/{task_id}` | Deletes a task. | `200` |
+| `POST` | `/transcribe` | Transcribes a `multipart/form-data` audio upload; optional endpoint not used by the current frontend. | `200` |
 
-Your backend must also expose:
+`PUT`, `PATCH`, and `DELETE` return `404` when the task ID does not exist. FastAPI returns `422` when a request fails schema validation. Tasks are stored in a module-level in-memory list: they are cleared when the backend restarts, and IDs are not reused during a run.
 
-- `POST /instruction`
-- `GET /tasks`
-- `POST /tasks`
-- `PUT /tasks/{task_id}`
-- `PATCH /tasks/{task_id}`
-- `DELETE /tasks/{task_id}`
+A task has this shape:
 
-Important:
-
-- Use **in-memory storage only**. No database and no files.
-- The frontend is provided and should not be modified as part of the exercise.
-- The backend included in this repository is only a template. You must implement the missing logic.
-
----
-
-## Repository structure
-
-```text
-voice-command-api/
-|-- .devcontainer/           # Codespaces setup
-|-- frontend/                # Ready-made frontend
-|   |-- public/
-|   `-- src/
-|-- src/
-|   `-- app/
-|       |-- api/routes/      # /transcribe, /instruction, /tasks
-|       |-- core/            # Settings and config
-|       |-- schemas/         # Request and response contracts
-|       |-- services/        # Your implementation goes here
-|       `-- utils/
-|-- pyproject.toml
-|-- README.md
-`-- README.es.md
+```json
+{
+  "id": 1,
+  "title": "Buy groceries",
+  "done": false
+}
 ```
 
----
+## Requirements
 
-## 🌱 How to start the project
+- Python 3.11 or later.
+- [uv](https://docs.astral.sh/uv/) to install and run the backend.
+- Node.js and npm for the frontend.
+- A Groq API key for `POST /instruction`.
+- A browser that supports Web Speech API and microphone permission for voice input. Manual transcription is available as a fallback.
 
-You can open this project in [GitHub Codespaces](https://codespaces.new/4GeeksAcademy/voice-command-api) or clone it locally.
+## Run locally
 
-If you use Codespaces, the repository already includes a `.devcontainer` prepared for Python, Node, FastAPI, and Vite.
-
-### Option A: GitHub Codespaces
-
-1. Open the repository in Codespaces.
-2. Wait for the dev container to finish installing dependencies.
-3. Create `.env` from `.env.example`.
-4. Create `frontend/.env` from `frontend/.env.example`.
-5. Run the backend and frontend from the terminal tabs.
-
-### Option B: Local setup
+Clone the repository and change into the project directory:
 
 ```bash
 git clone https://github.com/4GeeksAcademy/voice-command-api
 cd voice-command-api
 ```
 
-Create your own repository and update the remote:
+### 1. Configure the backend
 
-```bash
-git remote set-url origin https://github.com/YOUR_USERNAME/YOUR_REPOSITORY
+Create a `.env` file in the repository root:
+
+```env
+GROQ_API_KEY=your_groq_api_key
 ```
 
-### Backend setup
+Do not share or commit this file: `.env` is listed in `.gitignore`. Configuration also supports `GROQ_MODEL`, `GROQ_TRANSCRIPTION_MODEL`, `REQUEST_TIMEOUT_SECONDS`, and `ALLOWED_ORIGINS`. If `ALLOWED_ORIGINS` is not set, the API allows `http://localhost:5173` and `http://127.0.0.1:5173`.
 
-Create a `.env` file from `.env.example` and fill in your Groq credentials.
-
-Install dependencies and run the API:
+Install dependencies and start the API from the repository root:
 
 ```bash
 uv sync
 uv run uvicorn src.main:app --reload
 ```
 
-### Frontend setup
+The API runs at `http://localhost:8000`. Interactive API documentation is available at [`http://localhost:8000/docs`](http://localhost:8000/docs).
 
-Create `frontend/.env` from `frontend/.env.example`.
+### 2. Configure the frontend
 
-Run the frontend:
+In a separate terminal, create `frontend/.env`:
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+Install dependencies and start Vite:
 
 ```bash
 cd frontend
@@ -135,73 +118,43 @@ npm install
 npm run dev
 ```
 
----
+Open the local URL printed by Vite, usually `http://localhost:5173`. Restart the relevant server after changing an `.env` file so the new value is loaded.
 
-## 💻 What you need to do
+### GitHub Codespaces
 
-- [ ] Create a module-level `tasks` list with `id`, `title`, and `done`, using unique incremental IDs.
-- [ ] Implement `GET /tasks`, `POST /tasks`, `PUT /tasks/{task_id}`, `PATCH /tasks/{task_id}`, and `DELETE /tasks/{task_id}` using in-memory state.
-- [ ] Implement `POST /instruction` to receive `{ "transcription": "..." }`, call Groq, and return **only** routing JSON (no task execution):
+In Codespaces, create the same `.env` files. To make the API reachable outside the container, start Uvicorn on all interfaces:
 
-```json
-{
-  "endpoint": "/tasks",
-  "method": "POST",
-  "params": { "title": "Buy groceries" }
-}
+```bash
+uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-- [ ] Implement `POST /transcribe` to accept `multipart/form-data`, convert audio to text, reuse `/instruction` logic, execute the selected action, and return `transcription`, `instruction`, and `result`.
-- [ ] Do not hardcode intent matching with manual rules such as `if "add" in text`.
+In `frontend/.env`, use the forwarded URL for port `8000` instead of `localhost`, for example `VITE_API_BASE_URL=https://<forwarded-port-8000-url>`. Add the forwarded frontend origin (port `5173`) to the backend's `ALLOWED_ORIGINS` setting. Set the forwarded ports' visibility as required by your environment. Never put the Groq API key in a `VITE_*` variable or in the frontend.
 
-⚠️ **IMPORTANT:** The frontend does not resolve intents with Web Speech API. It only captures audio (up to 20 seconds), sends it to `POST /transcribe`, and shows backend transcription to debug STT vs. routing issues.
+## Quick check
 
-```json
-{
-  "transcription": "add buy groceries to my list",
-  "instruction": {
-    "endpoint": "/tasks",
-    "method": "POST",
-    "params": {
-      "title": "Buy groceries"
-    }
-  },
-  "result": {
-    "id": 1,
-    "title": "Buy groceries",
-    "done": false
-  }
-}
+With the backend running, list the tasks:
+
+```bash
+curl http://localhost:8000/tasks
 ```
 
----
+Create a task directly to check the endpoint:
 
-## Debugging tip
+```bash
+curl -X POST http://localhost:8000/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Buy groceries"}'
+```
 
-If the transcription shown in the frontend is already wrong, the problem is in the audio capture or speech-to-text step.
+To try voice input, open the frontend, grant microphone permission, and say a command such as “add buy groceries to my list.” The conversation displays the transcription and final response. Browser speech recognition may require an internet connection and depends on browser support; manual transcription is another option when available.
 
-If the transcription is correct but the action is wrong, the problem is in `/instruction`.
+## Development and delivery
 
----
+Build the frontend with:
 
-## ✅ What we will evaluate
+```bash
+cd frontend
+npm run build
+```
 
-- [ ] `POST /transcribe` accepts audio, transcribes it, and reuses `/instruction` routing logic.
-- [ ] `POST /instruction` receives plain text and returns only routing JSON (no action execution).
-- [ ] `GET /tasks`, `POST /tasks`, `PUT /tasks/{task_id}`, `PATCH /tasks/{task_id}`, and `DELETE /tasks/{task_id}` work correctly with in-memory state.
-- [ ] The frontend displays the transcription returned by the backend to help distinguish STT errors from routing errors.
-
----
-
-## 📦 How to submit this project
-
-1. Push your solution to your GitHub repository.
-2. Make sure backend and frontend are included and runnable locally.
-3. Share the repository URL and a short video/GIF showing:
-   - audio recording (20 seconds max),
-   - transcription visible in the frontend,
-   - correct task action execution.
-
----
-
-This and many other projects are built by students as part of the [Coding Bootcamps](https://4geeksacademy.com/) at 4Geeks Academy. Learn more about the [Full-Stack Software Developer](https://4geeksacademy.com/en/career-programs/full-stack), [Data Science & Machine Learning](https://4geeksacademy.com/en/career-programs/data-science-ml), [Cybersecurity](https://4geeksacademy.com/en/career-programs/cybersecurity), and [AI Engineering](https://4geeksacademy.com/en/career-programs/ai-engineering) programs.
+Before publishing the repository, make sure credential-bearing `.env` files are not included. Never commit your Groq API key.
