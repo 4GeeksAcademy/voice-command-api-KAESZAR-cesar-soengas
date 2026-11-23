@@ -4,6 +4,8 @@ from src.app.schemas.voice import Task, TaskCreate, TaskReplace, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
+tasks: list[Task] = []
+
 
 @router.get("", response_model=list[Task])
 def get_tasks() -> list[Task]:

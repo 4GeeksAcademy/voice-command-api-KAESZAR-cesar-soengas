@@ -19,9 +19,13 @@ class TaskUpdate(BaseModel):
 
 
 class Task(BaseModel):
-    id: int
-    title: str
-    done: bool
+    id: int = Field(..., description="Identificador único de la tarea", examples=[1])
+    title: str = Field(..., description="Título de la tarea", examples=["Comprar leche"])
+    done: bool = Field(
+        default=False,
+        description="Indica si la tarea está completada",
+        examples=[False],
+    )
 
 
 class InstructionRequest(BaseModel):
